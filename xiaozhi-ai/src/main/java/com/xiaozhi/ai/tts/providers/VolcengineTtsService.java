@@ -5,7 +5,6 @@ import com.google.gson.JsonParser;
 import com.xiaozhi.ai.tts.TtsService;
 import com.xiaozhi.ai.tts.XiaozhiTtsOptions;
 import com.xiaozhi.common.model.bo.ConfigBO;
-import com.xiaozhi.utils.AudioUtils;
 import com.xiaozhi.ai.utils.HttpUtil;
 
 import okhttp3.*;
@@ -20,7 +19,8 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 public class VolcengineTtsService implements TtsService {
     private static final String PROVIDER_NAME = "volcengine";
-    private static final String API_URL = "https://openspeech.bytedance.com/api/v1/tts";
+    private static final String API_URL = "https://openspeech.bytedance.com/api/v3/tts/unidirectional";
+    private static final String RESOURCE_ID = "seed-tts-2.0";
     private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 
     // 重试机制常量
@@ -31,7 +31,6 @@ public class VolcengineTtsService implements TtsService {
     private String outputPath;
 
     // API相关
-    private String appId;
     private String accessToken; // 对应 apiKey
 
     // 语音参数（voiceName, pitch, speed）
@@ -42,7 +41,6 @@ public class VolcengineTtsService implements TtsService {
     public VolcengineTtsService(ConfigBO config, String voiceName, Double pitch, Double speed, String outputPath) {
         this.options = XiaozhiTtsOptions.builder().voiceName(voiceName).pitch(pitch).speed(speed).build();
         this.outputPath = outputPath;
-        this.appId = config.getAppId();
         this.accessToken = config.getApiKey();
     }
 
@@ -102,101 +100,105 @@ public class VolcengineTtsService implements TtsService {
      * 发送POST请求到火山引擎API，获取语音合成结果
      */
     private boolean sendRequest(String text, String audioFilePath) throws Exception {
-        try {
-            // 构建请求参数
-            JsonObject requestJson = new JsonObject();
+    try {
+        JsonObject requestJson = new JsonObject();
 
-            // app部分
-            JsonObject app = new JsonObject();
-            app.addProperty("appid", appId);
-            app.addProperty("token", accessToken);
-            // 根据音色类型选择 cluster：克隆音色使用 volcano_mega，普通音色使用 volcano_tts
-            String cluster = (getVoiceName() != null && getVoiceName().startsWith("S_")) ? "volcano_mega" : "volcano_tts";
-            app.addProperty("cluster", cluster);
-            requestJson.add("app", app);
+        JsonObject user = new JsonObject();
+        user.addProperty("uid", UUID.randomUUID().toString());
+        requestJson.add("user", user);
 
-            // user部分
-            JsonObject user = new JsonObject();
-            user.addProperty("uid", UUID.randomUUID().toString());
-            requestJson.add("user", user);
+        JsonObject audioParams = new JsonObject();
+        audioParams.addProperty("format", "mp3");
+        audioParams.addProperty("sample_rate", 24000);
+        audioParams.addProperty("enable_timestamp", true);
 
-            // audio部分
-            JsonObject audio = new JsonObject();
-            audio.addProperty("voice_type", getVoiceName());
-            audio.addProperty("encoding", "wav");
-            audio.addProperty("speed_ratio", getSpeed());
-            audio.addProperty("volume_ratio", 1.0);
-            audio.addProperty("pitch_ratio", getPitch());
-            audio.addProperty("rate", AudioUtils.SAMPLE_RATE);
-            requestJson.add("audio", audio);
+        JsonObject reqParams = new JsonObject();
+        reqParams.addProperty("text", text);
+        reqParams.addProperty("speaker", getVoiceName());
+        reqParams.add("audio_params", audioParams);
 
-            // request部分
-            JsonObject request_JsonObject = new JsonObject();
-            request_JsonObject.addProperty("reqid", UUID.randomUUID().toString());
-            request_JsonObject.addProperty("text", text);
-            request_JsonObject.addProperty("text_type", "plain");
-            request_JsonObject.addProperty("operation", "query");
-            request_JsonObject.addProperty("with_frontend", 1);
-            request_JsonObject.addProperty("frontend_type", "unitTson");
-            requestJson.add("request", request_JsonObject);
+        requestJson.add("req_params", reqParams);
 
-            // 使用Bearer Token鉴权方式
-            String bearerToken = "Bearer; " + accessToken; // 注意分号是火山引擎的特殊格式
+        RequestBody requestBody = RequestBody.create(JSON, requestJson.toString());
 
-            RequestBody requestBody = RequestBody.create(JSON, requestJson.toString());
+        Request request = new Request.Builder()
+                .url(API_URL)
+                .addHeader("Content-Type", "application/json")
+                .addHeader("X-Api-Key", accessToken)
+                .addHeader("X-Api-Resource-Id", RESOURCE_ID)
+                .post(requestBody)
+                .build();
 
-            // 设置请求头和请求体
-            Request request = new Request.Builder()
-                    .url(API_URL)
-                    .addHeader("Content-Type", "application/json")
-                    .addHeader("Authorization", bearerToken) // 添加Authorization头
-                    .post(requestBody)
-                    .build();
-
-            try (Response response = client.newCall(request).execute()) {
-                if (!response.isSuccessful()) {
-                    String errorBody = response.body() != null ? response.body().string() : "无响应体";
-                    log.error("TTS请求失败: {} {}, 错误信息: {}, 原始内容: {}", response.code(), response.message(), errorBody, text);
-                    return false;
-                }
-
-                // 解析响应
-                if (response.body() != null) {
-                    String responseBody = response.body().string();
-                    JsonObject jsonResponse = JsonParser.parseString(responseBody).getAsJsonObject();
-
-                    // 检查响应是否包含错误
-                    if (jsonResponse.has("code") && jsonResponse.get("code").getAsInt() != 3000) {
-                        log.error("TTS请求返回错误: code={}, message={}",
-                                jsonResponse.get("code").getAsInt(),
-                                jsonResponse.get("message").getAsString());
-                        return false;
-                    }
-
-                    // 获取音频数据
-                    if (jsonResponse.has("data")) {
-                        String base64Audio = jsonResponse.get("data").getAsString();
-                        byte[] audioData = Base64.getDecoder().decode(base64Audio);
-
-                        // 保存音频文件
-                        File audioFile = new File(audioFilePath);
-                        try (FileOutputStream fout = new FileOutputStream(audioFile)) {
-                            fout.write(audioData);
-                        }
-
-                        return true;
-                    } else {
-                        log.error("TTS响应中未找到音频数据: {}", responseBody);
-                        return false;
-                    }
-                } else {
-                    log.error("TTS响应体为空");
-                    return false;
-                }
+        try (Response response = client.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                String errorBody = response.body() != null ? response.body().string() : "无响应体";
+                log.error("TTS请求失败: {} {}, 错误信息: {}, 原始内容: {}",
+                        response.code(), response.message(), errorBody, text);
+                return false;
             }
-        } catch (Exception e) {
-            log.error("发送TTS请求时发生错误", e);
-            throw new Exception("发送TTS请求失败", e);
+
+            if (response.body() == null) {
+                log.error("TTS响应体为空");
+                return false;
+            }
+
+            byte[] buffer;
+
+            try (java.io.BufferedReader reader =
+                         new java.io.BufferedReader(response.body().charStream());
+                 java.io.ByteArrayOutputStream audioBytes =
+                         new java.io.ByteArrayOutputStream()) {
+
+                String line;
+
+                while ((line = reader.readLine()) != null) {
+                    if (line.isBlank()) {
+                        continue;
+                    }
+
+                    JsonObject jsonResponse = JsonParser.parseString(line).getAsJsonObject();
+                    int code = jsonResponse.has("code") ? jsonResponse.get("code").getAsInt() : -1;
+
+                    if (code == 0 && jsonResponse.has("data") && !jsonResponse.get("data").isJsonNull()) {
+                        String base64Audio = jsonResponse.get("data").getAsString();
+                        byte[] chunk = Base64.getDecoder().decode(base64Audio);
+                        audioBytes.write(chunk);
+                        continue;
+                    }
+
+                    if (code == 0 && jsonResponse.has("sentence")) {
+                        log.debug("TTS sentence data: {}", jsonResponse);
+                        continue;
+                    }
+
+                    if (code == 20000000) {
+                        break;
+                    }
+
+                    if (code > 0) {
+                        log.error("TTS返回错误: {}", jsonResponse);
+                        return false;
+                    }
+                }
+
+                buffer = audioBytes.toByteArray();
+            }
+
+            if (buffer.length == 0) {
+                log.error("TTS没有返回音频数据");
+                return false;
+            }
+
+            File audioFile = new File(audioFilePath);
+            try (FileOutputStream fout = new FileOutputStream(audioFile)) {
+                fout.write(buffer);
+            }
+
+            return true;
         }
+    } catch (Exception e) {
+        log.error("发送TTS请求时发生错误", e);
+        throw new Exception("发送TTS请求失败", e);
     }
+}
 }

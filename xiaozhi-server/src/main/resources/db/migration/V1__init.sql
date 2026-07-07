@@ -3,24 +3,24 @@ SET NAMES utf8mb4;
 SET CHARACTER SET utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;
 
--- 创建本地用户并设置密码（使用mysql_native_password插件）
-CREATE USER IF NOT EXISTS 'xiaozhi'@'localhost' IDENTIFIED BY '123456';
+-- -- 创建本地用户并设置密码（使用mysql_native_password插件）
+-- CREATE USER IF NOT EXISTS 'xiaozhi'@'localhost' IDENTIFIED BY '123456';
 
--- 创建远程用户并设置密码（使用mysql_native_password插件）
-CREATE USER IF NOT EXISTS 'xiaozhi'@'%' IDENTIFIED BY '123456';
+-- -- 创建远程用户并设置密码（使用mysql_native_password插件）
+-- CREATE USER IF NOT EXISTS 'xiaozhi'@'%' IDENTIFIED BY '123456';
 
--- 仅授予本地用户对 xiaozhi 数据库的所有权限
-GRANT ALL PRIVILEGES ON xiaozhi.* TO 'xiaozhi'@'localhost';
+-- -- 仅授予本地用户对 xiaozhi 数据库的所有权限
+-- GRANT ALL PRIVILEGES ON xiaozhi.* TO 'xiaozhi'@'localhost';
 
--- 仅授予远程用户对 xiaozhi 数据库的所有权限
-GRANT ALL PRIVILEGES ON xiaozhi.* TO 'xiaozhi'@'%';
+-- -- 仅授予远程用户对 xiaozhi 数据库的所有权限
+-- GRANT ALL PRIVILEGES ON xiaozhi.* TO 'xiaozhi'@'%';
 
--- 刷新权限以使更改生效
-FLUSH PRIVILEGES;
+-- -- 刷新权限以使更改生效
+-- FLUSH PRIVILEGES;
 
--- 查看用户权限
-SHOW GRANTS FOR 'xiaozhi'@'localhost';
-SHOW GRANTS FOR 'xiaozhi'@'%';
+-- -- 查看用户权限
+-- SHOW GRANTS FOR 'xiaozhi'@'localhost';
+-- SHOW GRANTS FOR 'xiaozhi'@'%';
 
 -- 创建数据库（如果不存在）
 CREATE DATABASE IF NOT EXISTS `xiaozhi` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
