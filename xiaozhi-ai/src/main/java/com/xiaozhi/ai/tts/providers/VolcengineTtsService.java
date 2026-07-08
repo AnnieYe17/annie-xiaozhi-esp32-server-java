@@ -108,7 +108,7 @@ public class VolcengineTtsService implements TtsService {
         requestJson.add("user", user);
 
         JsonObject audioParams = new JsonObject();
-        audioParams.addProperty("format", "mp3");
+        audioParams.addProperty("format", "pcm");
         audioParams.addProperty("sample_rate", 24000);
         audioParams.addProperty("enable_timestamp", true);
 
@@ -118,7 +118,9 @@ public class VolcengineTtsService implements TtsService {
         reqParams.add("audio_params", audioParams);
 
         requestJson.add("req_params", reqParams);
-
+        log.info("Volcengine TTS request body = {}", requestJson);
+        log.info("Volcengine RESOURCE_ID = {}, voiceName = {}", RESOURCE_ID, getVoiceName());
+        
         RequestBody requestBody = RequestBody.create(JSON, requestJson.toString());
 
         Request request = new Request.Builder()

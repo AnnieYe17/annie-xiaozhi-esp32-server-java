@@ -24,8 +24,8 @@ public class DevController {
 
         Path path = ttsServiceFactory
                 .getTtsService(
-                        config,
-                        "zh_female_shuangkuaisisi_moon_bigtts",
+                        config,          
+                        "zh_female_xiaohe_uranus_bigtts",
                         1.0,
                         1.0
                 )

@@ -48,6 +48,8 @@ import lombok.extern.slf4j.Slf4j;
     "com.xiaozhi.memory",
     "com.xiaozhi.music",
     "com.xiaozhi.server",
+    "com.xiaozhi",
+    "com.xiaozhi.dev"
 })
 @MapperScan({
     "com.xiaozhi.authrole.dal.mysql.mapper",
