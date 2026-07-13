@@ -153,8 +153,21 @@ public class PersonaFactory {
         Assert.notNull(role, "role cannot be null");
         var sttId = role.getSttId();
         if (sttId == null || sttId <= 0) {
-            log.warn("角色没有配置STT服务 - Role: {},默认使用vosk", role.getRoleName());
-            return sttFactory.getSttService(null);
+            log.warn(
+                "角色没有配置STT服务 - Role: {}，本次会话尝试使用默认Vosk",
+                role.getRoleName()
+            );
+
+            try {
+                return sttFactory.getSttService(null);
+            } catch (Throwable e) {
+                log.warn(
+                    "默认Vosk初始化失败，本次会话暂不启用STT，仅用于测试TTS下行。原因: {}",
+                    e.getMessage(),
+                    e
+                );
+                return null;
+            }
         }
         var sttConfig = configService.getBO(sttId);
         if(sttConfig == null){
