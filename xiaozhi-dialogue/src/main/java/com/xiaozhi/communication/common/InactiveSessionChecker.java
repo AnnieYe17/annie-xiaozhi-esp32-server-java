@@ -76,13 +76,16 @@ public class InactiveSessionChecker {
                         // IDLE 和 LISTENING 均可触发（设备连接中但用户长时间没说话）
                         if (session.getDeviceState() != DeviceState.SPEAKING
                                 && session.getDeviceState() != DeviceState.THINKING) {
-                            log.info("会话 {} 已经 {} 秒没有有效活动，发送超时提示并自动关闭",
+                            if (session.isTimeoutDisconnect()) {
+                                return;
+                            }
+                            session.setTimeoutDisconnect(true);
+                            log.info("会话 {} 已经 {} 秒没有有效活动，发送超时提示，等待播放完成后自动关闭",
                                     session.getSessionId(), inactiveDuration.getSeconds());
                             session.clearAudioSinks();
-                            if (session.getPersona() != null) {
+                            if (session.getPersona() != null && session.isAudioChannelOpen()) {
                                 session.getPersona().sendGoodbyeMessage();
-                            }
-                            if (session instanceof WebSocketSession) {
+                            } else if (session instanceof WebSocketSession) {
                                 sessionManager.closeSession(session);
                             }
                         }

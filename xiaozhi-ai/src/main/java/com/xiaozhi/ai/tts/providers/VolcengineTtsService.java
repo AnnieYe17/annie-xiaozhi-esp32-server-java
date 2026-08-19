@@ -15,7 +15,6 @@ import java.nio.file.Path;
 import java.util.*;
 
 import lombok.extern.slf4j.Slf4j;
-import javax.sound.sampled.*;
 
 @Slf4j
 public class VolcengineTtsService implements TtsService {
@@ -53,6 +52,11 @@ public class VolcengineTtsService implements TtsService {
     @Override
     public XiaozhiTtsOptions getOptions() {
         return options;
+    }
+
+    @Override
+    public String audioFormat() {
+        return "pcm";
     }
 
     @Override
@@ -96,22 +100,6 @@ public class VolcengineTtsService implements TtsService {
         }
         throw new Exception("语音合成失败");
     }
-
-    private SourceDataLine openPcmSpeaker() throws Exception {
-    AudioFormat format = new AudioFormat(
-            24000,   // sample rate
-            16,      // sample size in bits
-            1,       // mono
-            true,    // signed
-            false    // little endian
-    );
-
-    DataLine.Info info = new DataLine.Info(SourceDataLine.class, format);
-    SourceDataLine line = (SourceDataLine) AudioSystem.getLine(info);
-    line.open(format);
-    line.start();
-    return line;
-}
 
     /**
      * 发送POST请求到火山引擎API，获取语音合成结果
@@ -166,8 +154,7 @@ public class VolcengineTtsService implements TtsService {
             try (java.io.BufferedReader reader =
                     new java.io.BufferedReader(response.body().charStream());
                 java.io.ByteArrayOutputStream audioBytes =
-                    new java.io.ByteArrayOutputStream();
-                SourceDataLine speakerLine = openPcmSpeaker()) {
+                    new java.io.ByteArrayOutputStream()) {
 
                 String line;
 
@@ -185,9 +172,6 @@ public class VolcengineTtsService implements TtsService {
 
                         // 保存到文件
                         audioBytes.write(chunk);
-
-                        // 实时播放
-                        speakerLine.write(chunk, 0, chunk.length);
 
                         continue;
                     }
@@ -207,8 +191,6 @@ public class VolcengineTtsService implements TtsService {
                     }
                 }
 
-                speakerLine.drain();
-                speakerLine.stop();
                 buffer = audioBytes.toByteArray();
             }
 
