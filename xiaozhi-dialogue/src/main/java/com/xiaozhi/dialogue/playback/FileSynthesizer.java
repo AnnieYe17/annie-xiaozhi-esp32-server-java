@@ -52,24 +52,53 @@ public class FileSynthesizer extends Synthesizer {
         llmDisposable = new SentenceHelper().convert(stringFlux).subscribe(result -> {
             String text = result.text();
             String mood = result.mood();
+
+            log.info("[LLM SENTENCE] text={}, mood={}", text, mood);
+
             Flux<Speech> lazyTtsFlux = Flux.create(sink -> {
                 try {
+                    log.info("[TTS START] {}", text);
+
                     Path audioPath = ttsService.textToSpeech(text);
+
+                    log.info("[TTS DONE] path={}", audioPath);
+
                     if (audioPath != null) {
-                        List<byte[]> chunks = AudioUtils.readAsPcmChunks(audioPath.toString());
+                        List<byte[]> chunks =
+                            AudioUtils.readAsPcmChunks(audioPath.toString());
+
+                        log.info("[PCM] chunks={}", chunks.size());
+
                         boolean first = true;
+
                         for (byte[] chunk : chunks) {
-                            sink.next(first ? new Speech(chunk, text).withMood(mood) : new Speech(chunk));
+                            sink.next(
+                                first
+                                    ? new Speech(chunk, text).withMood(mood)
+                                    : new Speech(chunk)
+                            );
+
                             first = false;
                         }
                     } else {
-                        log.error("TTS服务返回空音频文件 - SessionId: {}", chatSession.getSessionId());
+                        log.error(
+                            "TTS服务返回空音频文件 - SessionId: {}",
+                            chatSession.getSessionId()
+                        );
                     }
+
                 } catch (Exception e) {
-                    log.error("TTS合成出错: {} - SessionId: {}", e.getMessage(), chatSession.getSessionId());
+                    log.error(
+                        "TTS合成出错: {} - SessionId: {}",
+                        e.getMessage(),
+                        chatSession.getSessionId(),
+                        e
+                    );
                 }
+
                 sink.complete();
             });
+
             player.play(lazyTtsFlux);
         });
     }

@@ -23,6 +23,7 @@ import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.tool.ToolCallback;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Flux;
 
 import java.nio.file.Path;
@@ -150,6 +151,13 @@ public class Persona {
 
         Flux<ChatResponse> chatFlux = chatModel.stream(prompt)
             .doOnError(error -> {
+                if (error instanceof WebClientResponseException webEx) {
+                    log.error(
+                        "DeepSeek API error - status={}, body={}",
+                        webEx.getStatusCode(),
+                        webEx.getResponseBodyAsString()
+                    );
+                }
                 listener.onError(error);
             });
         chatFlux = chatFlux.doOnNext(chatResponse -> {

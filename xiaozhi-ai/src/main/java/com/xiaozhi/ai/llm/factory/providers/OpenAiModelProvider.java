@@ -56,7 +56,7 @@ public class OpenAiModelProvider implements ChatModelProvider {
     public ChatModel createChatModel(ConfigBO config, RoleBO role) {
         String endpoint = config.getApiUrl();
         String apiKey = config.getApiKey();
-        String model = config.getConfigName();
+        String model = config.getModelType();
         Double temperature = role.getTemperature();
         Double topP = role.getTopP();
         
