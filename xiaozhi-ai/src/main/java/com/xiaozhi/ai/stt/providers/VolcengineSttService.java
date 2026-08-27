@@ -34,7 +34,7 @@ public class VolcengineSttService implements SttService {
     private static final String PROVIDER_NAME = "volcengine";
 
     // WebSocket API地址
-    private static final String WS_API_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async";
+    private static final String WS_API_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream";
 
     // 识别超时时间（90秒）
     private static final long RECOGNITION_TIMEOUT_MS = 90000;
@@ -50,17 +50,15 @@ public class VolcengineSttService implements SttService {
     private static final byte SERVER_ERROR_RESPONSE = (byte) 0b1111;
     private static final byte JSON_SERIALIZATION = 0b0001;
     private static final byte GZIP_COMPRESSION = 0b0001;
-    private static final byte NO_SEQUENCE = 0b0000;
-    private static final byte LAST_PACKET = 0b0010;
+    private static final byte POS_SEQUENCE = 0b0001;
+    private static final byte NEG_WITH_SEQUENCE = 0b0011;
 
-    private final String appId;
     private final String accessToken;
     private final String resourceId;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public VolcengineSttService(ConfigBO config) {
-        this.appId = config.getAppId();
         this.accessToken = config.getApiKey();
         // 固定使用豆包流式语音识别模型1.0小时版
         this.resourceId = "volc.bigasr.sauc.duration";
@@ -74,12 +72,12 @@ public class VolcengineSttService implements SttService {
     @Override
     public SttResult stream(Flux<byte[]> audioFlux) {
         // 检查配置是否已设置
-        if (appId == null || accessToken == null) {
-            log.error("火山引擎语音识别配置未设置，无法进行识别");
+        if (accessToken == null || accessToken.isBlank()) {
+            log.error("火山引擎语音识别 API Key 未设置，无法进行识别");
             return null;
         }
 
-        String connectId = UUID.randomUUID().toString();
+        String requestId = UUID.randomUUID().toString();
         AtomicReference<SttResult> finalResult = new AtomicReference<>(SttResult.textOnly(""));
         AtomicBoolean isCompleted = new AtomicBoolean(false);
         AtomicBoolean latchReleased = new AtomicBoolean(false);
@@ -100,23 +98,27 @@ public class VolcengineSttService implements SttService {
         // 构建请求
         Request request = new Request.Builder()
                 .url(WS_API_URL)
-                .addHeader("X-Api-App-Key", appId)
-                .addHeader("X-Api-Access-Key", accessToken)
+                .addHeader("X-Api-Key", accessToken)
                 .addHeader("X-Api-Resource-Id", resourceId)
-                .addHeader("X-Api-Connect-Id", connectId)
+                .addHeader("X-Api-Request-Id", requestId)
                 .build();
 
         HttpUtil.client.newWebSocket(request, new WebSocketListener() {
             private final StringBuilder textBuilder = new StringBuilder();
 
+            // seq=1 已经留给 full client request
+            private int seq = 2;
+
             @Override
             public void onOpen(WebSocket webSocket, Response response) {
                 webSocketRef.set(webSocket);
+                log.info("Volcengine ASR WebSocket opened, requestId={}", requestId);
 
                 // 发送 full client request
                 try {
                     byte[] fullRequest = buildFullClientRequest();
                     webSocket.send(okio.ByteString.of(fullRequest));
+                    log.info("Volcengine ASR full request sent: seq={}", 1);
                 } catch (Exception e) {
                     log.error("发送 full client request 失败", e);
                     webSocket.close(1000, "发送请求失败");
@@ -129,8 +131,11 @@ public class VolcengineSttService implements SttService {
                             byte[] audioChunk = audioQueue.poll(QUEUE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
                             if (audioChunk != null && audioChunk.length > 0) {
                                 try {
-                                    byte[] audioRequest = buildAudioRequest(audioChunk, false);
+                                    byte[] audioRequest = buildAudioRequest(seq, audioChunk, false);
                                     webSocket.send(okio.ByteString.of(audioRequest));
+                                    log.info("Volcengine ASR audio sent: seq={}, bytes={}",
+                                            seq, audioChunk.length);
+                                    seq++;
                                 } catch (Exception e) {
                                     log.error("发送音频数据时发生错误", e);
                                     break;
@@ -140,8 +145,9 @@ public class VolcengineSttService implements SttService {
 
                         // 发送最后一包（空音频，标记结束）
                         try {
-                            byte[] lastRequest = buildAudioRequest(new byte[0], true);
+                            byte[] lastRequest = buildAudioRequest(seq, new byte[0], true);
                             webSocket.send(okio.ByteString.of(lastRequest));
+                            log.info("Volcengine ASR last packet sent: seq={}", -seq);
                         } catch (Exception e) {
                             log.error("发送最后一包时发生错误", e);
                         }
@@ -154,7 +160,7 @@ public class VolcengineSttService implements SttService {
             @Override
             public void onMessage(WebSocket webSocket, okio.ByteString bytes) {
                 try {
-                    parseServerResponse(bytes.toByteArray(), textBuilder, finalResult, recognitionLatch, latchReleased, connectId);
+                    parseServerResponse(bytes.toByteArray(), textBuilder, finalResult, recognitionLatch, latchReleased, requestId);
                 } catch (Exception e) {
                     log.error("解析服务器响应失败", e);
                 }
@@ -180,7 +186,7 @@ public class VolcengineSttService implements SttService {
             // 等待识别完成或超时
             boolean recognized = recognitionLatch.await(RECOGNITION_TIMEOUT_MS, TimeUnit.MILLISECONDS);
             if (!recognized) {
-                log.warn("火山引擎识别超时 - ConnectId: {}", connectId);
+                log.warn("火山引擎识别超时 - RequestId: {}", requestId);
             }
         } catch (InterruptedException e) {
             log.error("等待识别结果时被中断", e);
@@ -235,49 +241,74 @@ public class VolcengineSttService implements SttService {
         byte[] compressedPayload = gzipCompress(jsonBytes);
 
         // 构建二进制消息
-        return buildBinaryMessage(FULL_CLIENT_REQUEST, NO_SEQUENCE, JSON_SERIALIZATION, GZIP_COMPRESSION, compressedPayload);
+        return buildBinaryMessage(
+            FULL_CLIENT_REQUEST,
+            POS_SEQUENCE,
+            JSON_SERIALIZATION,
+            GZIP_COMPRESSION,
+            1,
+            compressedPayload
+        );
     }
 
     /**
      * 构建 audio only request 消息
      */
-    private byte[] buildAudioRequest(byte[] audioData, boolean isLast) throws Exception {
-        // Gzip 压缩音频数据
+    private byte[] buildAudioRequest(
+        int seq,
+        byte[] audioData,
+        boolean isLast) throws Exception {
+
         byte[] compressedPayload = gzipCompress(audioData);
 
-        byte flags = isLast ? LAST_PACKET : NO_SEQUENCE;
+        byte flags;
+        int actualSeq;
 
-        // 构建二进制消息
-        return buildBinaryMessage(AUDIO_ONLY_REQUEST, flags, (byte) 0b0000, GZIP_COMPRESSION, compressedPayload);
+        if (isLast) {
+            flags = NEG_WITH_SEQUENCE;
+            actualSeq = -seq;
+        } else {
+            flags = POS_SEQUENCE;
+            actualSeq = seq;
+        }
+
+        return buildBinaryMessage(
+                AUDIO_ONLY_REQUEST,
+                flags,
+                (byte) 0b0000,
+                GZIP_COMPRESSION,
+                actualSeq,
+                compressedPayload
+        );
     }
 
     /**
      * 构建二进制消息
      */
-    private byte[] buildBinaryMessage(byte messageType, byte flags, byte serialization, byte compression, byte[] payload) {
-        ByteBuffer buffer = ByteBuffer.allocate(4 + 4 + payload.length);
+    private byte[] buildBinaryMessage(
+        byte messageType,
+        byte flags,
+        byte serialization,
+        byte compression,
+        int seq,
+        byte[] payload) {
+
+        ByteBuffer buffer =
+                ByteBuffer.allocate(4 + 4 + 4 + payload.length);
+
         buffer.order(ByteOrder.BIG_ENDIAN);
 
-        // Header (4 bytes)
-        byte byte0 = (byte) ((PROTOCOL_VERSION << 4) | HEADER_SIZE);
-        byte byte1 = (byte) ((messageType << 4) | flags);
-        byte byte2 = (byte) ((serialization << 4) | compression);
-        byte byte3 = 0x00; // Reserved
+        buffer.put((byte) ((PROTOCOL_VERSION << 4) | HEADER_SIZE));
+        buffer.put((byte) ((messageType << 4) | flags));
+        buffer.put((byte) ((serialization << 4) | compression));
+        buffer.put((byte) 0x00);
 
-        buffer.put(byte0);
-        buffer.put(byte1);
-        buffer.put(byte2);
-        buffer.put(byte3);
-
-        // Payload size (4 bytes, big-endian)
+        buffer.putInt(seq);
         buffer.putInt(payload.length);
-
-        // Payload
         buffer.put(payload);
 
         return buffer.array();
     }
-
     /**
      * 解析服务器响应
      */
