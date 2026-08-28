@@ -152,6 +152,8 @@ public class PersonaFactory {
     private SttService initSttService(RoleBO role){
         Assert.notNull(role, "role cannot be null");
         var sttId = role.getSttId();
+        log.info("准备初始化STT - RoleId: {}, RoleName: {}, SttId: {}",
+                role.getRoleId(), role.getRoleName(), sttId);
         if (sttId == null || sttId <= 0) {
             log.warn(
                 "角色没有配置STT服务 - Role: {}，本次会话尝试使用默认Vosk",
@@ -170,6 +172,13 @@ public class PersonaFactory {
             }
         }
         var sttConfig = configService.getBO(sttId);
+        log.info("读取STT配置 - RoleId: {}, SttId: {}, ConfigId: {}, ConfigType: {}, Provider: {}, State: {}, ApiKeyPresent: {}",
+                role.getRoleId(), sttId,
+                sttConfig != null ? sttConfig.getConfigId() : null,
+                sttConfig != null ? sttConfig.getConfigType() : null,
+                sttConfig != null ? sttConfig.getProvider() : null,
+                sttConfig != null ? sttConfig.getState() : null,
+                sttConfig != null && sttConfig.getApiKey() != null && !sttConfig.getApiKey().isBlank());
         if(sttConfig == null){
             log.error("无法获取STT服务配置 - Id: {}", sttId);
             return null;
@@ -177,6 +186,9 @@ public class PersonaFactory {
         SttService sttService = sttFactory.getSttService(sttConfig);
         if (sttService == null) {
             log.error("无法获取STT服务 - Provider: {}", sttConfig != null ? sttConfig.getProvider() : "null");
+        } else {
+            log.info("STT服务初始化完成 - RoleId: {}, SttId: {}, Provider: {}, ServiceProvider: {}",
+                    role.getRoleId(), sttId, sttConfig.getProvider(), sttService.getProviderName());
         }
         return sttService;
     }

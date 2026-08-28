@@ -95,6 +95,7 @@ public class MessageHandler {
 
     // 用于存储设备ID和验证码生成状态的映射
     private final Map<String, Boolean> captchaGenerationInProgress = new ConcurrentHashMap<>();
+    private final Map<String, Long> audioFrameCounters = new ConcurrentHashMap<>();
 
     /**
      * 处理连接建立事件.
@@ -218,8 +219,16 @@ public class MessageHandler {
      * @param opusData
      */
     public void handleBinaryMessage(String sessionId, byte[] opusData) {
+        long frameNo = audioFrameCounters.merge(sessionId, 1L, Long::sum);
+        if (frameNo <= 5 || frameNo % 50 == 0) {
+            log.info("收到ESP32音频帧 - SessionId: {}, FrameNo: {}, Bytes: {}",
+                    sessionId, frameNo, opusData == null ? 0 : opusData.length);
+        }
+
         ChatSession chatSession = sessionManager.getSession(sessionId);
         if ((chatSession == null || !chatSession.isOpen()) && !vadService.isSessionInitialized(sessionId)) {
+            log.warn("丢弃音频帧：会话不存在或未打开，且VAD未初始化 - SessionId: {}, FrameNo: {}",
+                    sessionId, frameNo);
             return;
         }
         // 委托给DialogueService处理音频数据

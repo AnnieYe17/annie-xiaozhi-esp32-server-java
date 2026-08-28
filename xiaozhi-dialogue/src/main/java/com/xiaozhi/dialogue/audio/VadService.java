@@ -71,6 +71,7 @@ public class VadService {
 
         private int consecutiveSilenceFrames = 0;
         private int consecutiveSpeechFrames = 0;
+        private long audioFrameCount = 0;
 
         // 静音期间累计帧数，用于SPEECH_END时按比例移除静音帧
         private int silenceFrameCount = 0;
@@ -173,6 +174,7 @@ public class VadService {
             silenceTime = 0;
             consecutiveSilenceFrames = 0;
             consecutiveSpeechFrames = 0;
+            audioFrameCount = 0;
             silenceFrameCount = 0;
             originalProbs.clear();
             sileroState = new float[2][1][128];
@@ -209,7 +211,11 @@ public class VadService {
     }
 
     public VadResult processAudio(String sessionId, byte[] opusData) {
-        if (!isSessionInitialized(sessionId)) return null;
+        if (!isSessionInitialized(sessionId)) {
+            log.warn("VAD未初始化，跳过音频帧 - SessionId: {}, OpusBytes: {}",
+                    sessionId, opusData == null ? 0 : opusData.length);
+            return null;
+        }
 
         Object lock = getLock(sessionId);
 
@@ -233,15 +239,19 @@ public class VadService {
         synchronized (lock) {
             try {
                 VadState state = states.computeIfAbsent(sessionId, k -> new VadState());
+                long frameNo = ++state.audioFrameCount;
 
                 byte[] pcmData;
                 try {
                     pcmData = state.opusProcessor.opusToPcm(opusData);
                     if (pcmData == null || pcmData.length == 0) {
+                        log.warn("Opus解码后无PCM数据 - SessionId: {}, FrameNo: {}, OpusBytes: {}",
+                                sessionId, frameNo, opusData == null ? 0 : opusData.length);
                         return new VadResult(VadStatus.NO_SPEECH, null);
                     }
                 } catch (Exception e) {
-                    log.error("Opus解码失败: {}", e.getMessage());
+                    log.error("Opus解码失败 - SessionId: {}, FrameNo: {}, OpusBytes: {}, Error: {}",
+                            sessionId, frameNo, opusData == null ? 0 : opusData.length, e.getMessage(), e);
                     return new VadResult(VadStatus.ERROR, null);
                 }
 
@@ -251,7 +261,8 @@ public class VadService {
                 }
 
                 float[] samples = bytesToFloats(pcmData);
-                float energy = calcEnergy(samples);
+                PcmStats pcmStats = analyzePcm(samples);
+                float energy = pcmStats.energy();
 
                 float speechProb = Math.min(1.0f, detectSpeech(state, samples));
 
@@ -263,6 +274,24 @@ public class VadService {
                 // 播放和静听使用完全相同的判断逻辑
                 boolean isSpeech = speechProb > speechThreshold && hasEnergy;
                 boolean isSilence = speechProb < silenceThreshold || !hasEnergy;
+
+                if (shouldLogFrame(frameNo)) {
+                    log.info("音频诊断 - SessionId: {}, FrameNo: {}, OpusBytes: {}, PcmBytes: {}, Samples: {}, Energy: {}, MaxAbs: {}, ZeroRatio: {}, SpeechProb: {}, SpeechTh: {}, SilenceTh: {}, EnergyTh: {}, HasEnergy: {}, IsSpeech: {}, IsSilence: {}, Speaking: {}",
+                            sessionId, frameNo, opusData == null ? 0 : opusData.length, pcmData.length,
+                            samples.length, fmt(energy), fmt(pcmStats.maxAbs()), fmt(pcmStats.zeroRatio()),
+                            fmt(speechProb), fmt(speechThreshold), fmt(silenceThreshold), fmt(energyThreshold),
+                            hasEnergy, isSpeech, isSilence, state.isSpeaking());
+                }
+
+                if (pcmStats.maxAbs() < 0.001f || energy < 0.00005f) {
+                    log.warn("PCM几乎全为零或音量极低 - SessionId: {}, FrameNo: {}, Energy: {}, MaxAbs: {}, ZeroRatio: {}, EnergyTh: {}",
+                            sessionId, frameNo, fmt(energy), fmt(pcmStats.maxAbs()),
+                            fmt(pcmStats.zeroRatio()), fmt(energyThreshold));
+                } else if (!state.isSpeaking() && hasEnergy && speechProb <= speechThreshold && shouldLogFrame(frameNo)) {
+                    log.warn("PCM正常但VAD未触发语音开始，可能阈值过高 - SessionId: {}, FrameNo: {}, SpeechProb: {}, SpeechTh: {}, Energy: {}, EnergyTh: {}, ConsecutiveSpeechFrames: {}",
+                            sessionId, frameNo, fmt(speechProb), fmt(speechThreshold), fmt(energy),
+                            fmt(energyThreshold), state.getConsecutiveSpeechFrames());
+                }
 
                 state.updateSilence(isSilence);
 
@@ -290,9 +319,9 @@ public class VadService {
                     state.setSpeaking(true);
                     state.resetSilenceFrameCount();
 
-                    log.debug("检测到语音开始 - SessionId: {}, 概率: {}, 能量: {}, 阈值: {}",
-                            sessionId, String.format("%.4f", speechProb),
-                            String.format("%.6f", energy), String.format("%.4f", speechThreshold));
+                    log.info("VAD检测到语音开始 - SessionId: {}, FrameNo: {}, SpeechProb: {}, Energy: {}, SpeechTh: {}, EnergyTh: {}, PreBufferBytes: {}",
+                            sessionId, frameNo, fmt(speechProb), fmt(energy), fmt(speechThreshold),
+                            fmt(energyThreshold), state.preBufferSize);
 
                     byte[] preBufferData = state.drainPreBuffer();
                     byte[] result = preBufferData.length > 0 ? preBufferData : pcmData;
@@ -317,7 +346,8 @@ public class VadService {
                                 }
                             }
                         }
-                        log.debug("语音结束: {}, 静音: {}ms", sessionId, silenceDuration);
+                        log.info("VAD检测到语音结束 - SessionId: {}, FrameNo: {}, Silence: {}ms, SilenceTimeout: {}ms, PcmChunks: {}",
+                                sessionId, frameNo, silenceDuration, silenceTimeoutMs, state.pcmData.size());
 
                         state.resetSilenceFrameCount();
 
@@ -391,11 +421,29 @@ public class VadService {
         return samples;
     }
 
-    private float calcEnergy(float[] samples) {
-        float sum = 0;
-        for (float sample : samples) sum += Math.abs(sample);
-        return sum / samples.length;
+    private PcmStats analyzePcm(float[] samples) {
+        if (samples == null || samples.length == 0) return new PcmStats(0, 0, 1);
+        float absSum = 0;
+        float maxAbs = 0;
+        int nearZero = 0;
+        for (float sample : samples) {
+            float abs = Math.abs(sample);
+            absSum += abs;
+            maxAbs = Math.max(maxAbs, abs);
+            if (abs < 0.00001f) nearZero++;
+        }
+        return new PcmStats(absSum / samples.length, maxAbs, (float) nearZero / samples.length);
     }
+
+    private boolean shouldLogFrame(long frameNo) {
+        return frameNo <= 5 || frameNo % 25 == 0;
+    }
+
+    private String fmt(float value) {
+        return String.format(Locale.ROOT, "%.6f", value);
+    }
+
+    private record PcmStats(float energy, float maxAbs, float zeroRatio) {}
 
     /**
      * TTS播放结束时重置VAD隐状态，清除TTS期间麦克风拾音对GRU的污染。

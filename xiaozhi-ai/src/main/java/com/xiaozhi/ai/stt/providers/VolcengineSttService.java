@@ -17,6 +17,7 @@ import java.nio.ByteOrder;
 import java.util.UUID;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.GZIPOutputStream;
 import java.util.zip.GZIPInputStream;
@@ -55,13 +56,19 @@ public class VolcengineSttService implements SttService {
 
     private final String accessToken;
     private final String resourceId;
+    private final Integer configId;
+    private final String configName;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public VolcengineSttService(ConfigBO config) {
         this.accessToken = config.getApiKey();
+        this.configId = config.getConfigId();
+        this.configName = config.getConfigName();
         // 固定使用豆包流式语音识别模型1.0小时版
         this.resourceId = "volc.bigasr.sauc.duration";
+        log.info("创建Volcengine STT服务 - ConfigId: {}, ConfigName: {}, ResourceId: {}, ApiKey: {}",
+                configId, configName, resourceId, maskApiKey(accessToken));
     }
 
     @Override
@@ -73,21 +80,36 @@ public class VolcengineSttService implements SttService {
     public SttResult stream(Flux<byte[]> audioFlux) {
         // 检查配置是否已设置
         if (accessToken == null || accessToken.isBlank()) {
-            log.error("火山引擎语音识别 API Key 未设置，无法进行识别");
+            log.error("火山引擎语音识别 API Key 未设置，无法进行识别 - ConfigId: {}, ConfigName: {}, ResourceId: {}",
+                    configId, configName, resourceId);
             return null;
         }
 
         String requestId = UUID.randomUUID().toString();
+        log.info("开始Volcengine STT流式识别 - RequestId: {}, ConfigId: {}, ConfigName: {}, ResourceId: {}, ApiKey: {}",
+                requestId, configId, configName, resourceId, maskApiKey(accessToken));
         AtomicReference<SttResult> finalResult = new AtomicReference<>(SttResult.textOnly(""));
         AtomicBoolean isCompleted = new AtomicBoolean(false);
         AtomicBoolean latchReleased = new AtomicBoolean(false);
+        AtomicLong receivedAudioChunks = new AtomicLong(0);
+        AtomicLong receivedAudioBytes = new AtomicLong(0);
         CountDownLatch recognitionLatch = new CountDownLatch(1);
         BlockingQueue<byte[]> audioQueue = new LinkedBlockingQueue<>();
         AtomicReference<WebSocket> webSocketRef = new AtomicReference<>();
 
         // 订阅音频流
         audioFlux.subscribe(
-                data -> audioQueue.offer(data),
+                data -> {
+                    long chunkNo = receivedAudioChunks.incrementAndGet();
+                    receivedAudioBytes.addAndGet(data == null ? 0 : data.length);
+                    if (chunkNo <= 5 || chunkNo % 25 == 0) {
+                        log.info("Volcengine STT收到PCM输入 - RequestId: {}, ChunkNo: {}, Bytes: {}, TotalBytes: {}",
+                                requestId, chunkNo, data == null ? 0 : data.length, receivedAudioBytes.get());
+                    }
+                    if (data != null) {
+                        audioQueue.offer(data);
+                    }
+                },
                 error -> {
                     log.error("音频流处理错误", error);
                     isCompleted.set(true);
@@ -112,7 +134,8 @@ public class VolcengineSttService implements SttService {
             @Override
             public void onOpen(WebSocket webSocket, Response response) {
                 webSocketRef.set(webSocket);
-                log.info("Volcengine ASR WebSocket opened, requestId={}", requestId);
+                log.info("Volcengine ASR WebSocket opened - RequestId: {}, HttpCode: {}, ResourceId: {}",
+                        requestId, response != null ? response.code() : null, resourceId);
 
                 // 发送 full client request
                 try {
@@ -168,7 +191,10 @@ public class VolcengineSttService implements SttService {
 
             @Override
             public void onFailure(WebSocket webSocket, Throwable t, Response response) {
-                log.error("火山引擎识别失败", t);
+                log.error("火山引擎识别失败 - RequestId: {}, ConfigId: {}, ResourceId: {}, HttpCode: {}, Message: {}",
+                        requestId, configId, resourceId,
+                        response != null ? response.code() : null,
+                        response != null ? response.message() : null, t);
                 if (latchReleased.compareAndSet(false, true)) {
                     recognitionLatch.countDown();
                 }
@@ -176,6 +202,8 @@ public class VolcengineSttService implements SttService {
 
             @Override
             public void onClosed(WebSocket webSocket, int code, String reason) {
+                log.info("Volcengine ASR WebSocket closed - RequestId: {}, Code: {}, Reason: {}, AudioChunks: {}, AudioBytes: {}",
+                        requestId, code, reason, receivedAudioChunks.get(), receivedAudioBytes.get());
                 if (latchReleased.compareAndSet(false, true)) {
                     recognitionLatch.countDown();
                 }
@@ -186,7 +214,8 @@ public class VolcengineSttService implements SttService {
             // 等待识别完成或超时
             boolean recognized = recognitionLatch.await(RECOGNITION_TIMEOUT_MS, TimeUnit.MILLISECONDS);
             if (!recognized) {
-                log.warn("火山引擎识别超时 - RequestId: {}", requestId);
+                log.warn("火山引擎识别超时 - RequestId: {}, ResourceId: {}, AudioChunks: {}, AudioBytes: {}",
+                        requestId, resourceId, receivedAudioChunks.get(), receivedAudioBytes.get());
             }
         } catch (InterruptedException e) {
             log.error("等待识别结果时被中断", e);
@@ -200,6 +229,12 @@ public class VolcengineSttService implements SttService {
         }
 
         return finalResult.get();
+    }
+
+    private String maskApiKey(String apiKey) {
+        if (apiKey == null || apiKey.isBlank()) return "EMPTY";
+        if (apiKey.length() <= 8) return "***";
+        return apiKey.substring(0, 4) + "****" + apiKey.substring(apiKey.length() - 4);
     }
 
     /**

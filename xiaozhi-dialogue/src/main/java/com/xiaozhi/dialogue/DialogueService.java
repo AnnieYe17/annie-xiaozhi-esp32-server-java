@@ -101,8 +101,19 @@ public class DialogueService{
 
             // 处理VAD
             VadService.VadResult vadResult = vadService.processAudio(sessionId, opusData);
-            if (vadResult == null || vadResult.getStatus() == VadStatus.ERROR
-                    || vadResult.getProcessedData() == null) {
+            if (vadResult == null) {
+                log.warn("VAD没有返回结果 - SessionId: {}, OpusBytes: {}", sessionId, opusData.length);
+                return;
+            }
+            if (vadResult.getStatus() == VadStatus.ERROR) {
+                log.warn("VAD返回错误 - SessionId: {}, OpusBytes: {}", sessionId, opusData.length);
+                return;
+            }
+            if (vadResult.getStatus() == VadStatus.NO_SPEECH) {
+                return;
+            }
+            if (vadResult.getStatus() != VadStatus.NO_SPEECH && vadResult.getProcessedData() == null) {
+                log.warn("VAD返回{}但没有PCM数据 - SessionId: {}", vadResult.getStatus(), sessionId);
                 return;
             }
 
@@ -111,6 +122,8 @@ public class DialogueService{
             // 根据VAD状态处理
             switch (vadResult.getStatus()) {
                 case SPEECH_START:
+                    log.info("准备启动STT - SessionId: {}, InitialPcmBytes: {}",
+                            sessionId, vadResult.getProcessedData().length);
                     // 先启动STT（同步创建音频流），确保流已准备好
                     startStt(session, sessionId, vadResult.getProcessedData());
                     // 再触发abort停止当前播放中的TTS
@@ -129,6 +142,8 @@ public class DialogueService{
                     break;
 
                 case SPEECH_END:
+                    log.info("VAD语音结束，准备完成音频流 - SessionId: {}, PcmBytes: {}",
+                            sessionId, vadResult.getProcessedData().length);
                     // 语音结束，完成流式识别；状态切换为 THINKING 等待 LLM 响应
                     if (session.getDeviceState() == DeviceState.LISTENING) {
                         session.completeAudioStream();
@@ -173,12 +188,18 @@ public class DialogueService{
 
                 Persona persona = session.getPersona();
                 if (persona == null || persona.getSttService() == null) {
+                    log.warn("STT未启动：Persona或SttService为空 - SessionId: {}, HasPersona: {}",
+                            sessionId, persona != null);
                     return;
                 }
 
+                log.info("开始调用STT流式识别 - SessionId: {}, Provider: {}",
+                        sessionId, persona.getSttService().getProviderName());
                 var sttResult = persona.getSttService().stream(session.getAudioSinks().asFlux());
 
                 if (sttResult == null || !StringUtils.hasText(sttResult.text())) {
+                    log.warn("STT没有返回有效文本 - SessionId: {}, Provider: {}, ResultNull: {}",
+                            sessionId, persona.getSttService().getProviderName(), sttResult == null);
                     return;
                 }
 
